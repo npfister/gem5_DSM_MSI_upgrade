@@ -1,0 +1,6 @@
+protocol "MSI_ece666";
+include "RubySlicc_interfaces.slicc";
+include "MSI_ece666-msg.sm";
+include "MSI_ece666-cache.sm";
+include "MSI_ece666-dir.sm";
+include "MSI_ece666-dma.sm";

@@ -41,6 +41,7 @@ all_protocols.extend([
     'MOESI_hammer',
     'Network_test',
     'MSI_ece666',
+    'MSI_snarf',
     'None'
     ])
 

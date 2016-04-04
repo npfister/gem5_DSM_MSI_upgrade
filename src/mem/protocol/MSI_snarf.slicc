@@ -1,0 +1,6 @@
+protocol "MSI_snarf";
+include "RubySlicc_interfaces.slicc";
+include "MSI_snarf-msg.sm";
+include "MSI_snarf-cache.sm";
+include "MSI_snarf-dir.sm";
+include "MSI_snarf-dma.sm";

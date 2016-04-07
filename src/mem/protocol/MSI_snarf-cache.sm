@@ -92,6 +92,10 @@ machine(L1Cache, "MSI Snarfing L1 Cache")
     Inv_Ack,    desc="Invalidation ack from node with block";
     Last_Inv_Ack,  desc="Final Invalidation ack from nodes";
     Dir_Rsp,    desc="Directory responsds to request with number of acks needed";
+
+    //Snarfing
+    Snarf_Data, desc="Received Snarf Data from dir";
+    Snarf_Nack, desc="No room in cache for snarf data";
   }
 
   // STRUCTURE DEFINITIONS
@@ -293,6 +297,14 @@ machine(L1Cache, "MSI Snarfing L1 Cache")
           }
           else {
             trigger(Event:Inv_Ack, in_msg.Addr, cache_entry, tbe);
+          }
+        }
+        else if (in_msg.Type == CoherenceResponseType:SNARF_DATA) {
+          if(cacheMemory.cacheAvail(in_msg.Addr)) {
+            trigger(Event:Snarf_Data, in_msg.Addr, cache_entry, tbe);
+          }
+          else {
+            trigger(Event:Snarf_Nack, in_msg.Addr, cache_entry, tbe);
           }
         }
         else {
@@ -552,6 +564,33 @@ machine(L1Cache, "MSI Snarfing L1 Cache")
     }
   }
 
+  //SNARFING Actions
+
+  action(xs_copyDataToCache, "xs", desc="Copy data from the message into the cache") {
+    assert(is_valid(cache_entry));
+    peek(responseNetwork_in, ResponseMsg) {
+      cache_entry.DataBlk := in_msg.DataBlk;
+    }
+  }
+
+  action(sf_sendSnarfNack, "sf", desc="Send Snarf Nack to Dir") {
+    peek(forwardRequestNetwork_in, RequestMsg) {
+      enqueue(requestNetwork_out, RequestMsg, issue_latency) {
+        out_msg.Addr := address;
+        out_msg.Type := CoherenceRequestType:SNARF_NACK;
+        out_msg.Destination.add(map_Address_to_Directory(in_msg.Addr));
+        out_msg.MessageSize := MessageSizeType:Control;
+      }
+    }
+  }
+
+  action(rxs_load_hit, "rxs", desc="External load completed.") {
+    peek(forwardRequestNetwork_in, RequestMsg) {
+      assert(is_valid(cache_entry));
+      sequencer.readCallback(address, cache_entry.DataBlk, true,
+                             machineIDToMachineType(map_Address_to_Directory(in_msg.Addr)));
+    }
+  }
   // TRANSITIONS
   
   //stall transitions:
@@ -767,7 +806,7 @@ machine(L1Cache, "MSI Snarfing L1 Cache")
 
   transition(MI_A, Fwd_GETS, SI_A) {
     //Go wait for inv or put ack, if receive put ack, our messge got to dir first
-    ee_sendDataFromTBE;
+    //ee_sendDataFromTBE;  change 4/5/16 snarfing will get data to requestor
     etd_sendDataDir;
     o_popForwardedRequestQueue;
   }
@@ -783,7 +822,7 @@ machine(L1Cache, "MSI Snarfing L1 Cache")
 
   transition(M, Fwd_GETS, S) {
     //send data to requestor and dir
-    e_sendData;
+    //e_sendData; change 4/5/16 snarfing will get data to requestor
     ed_sendDataDir;
     o_popForwardedRequestQueue;
   }
@@ -793,4 +832,65 @@ machine(L1Cache, "MSI Snarfing L1 Cache")
     ed_sendDataDir;
     o_popForwardedRequestQueue;
   }
+
+  //SNARFING Transitions
+
+  transition(I, Snarf_Data, S) {
+    //allocate cache entry
+    //copy data into cache
+    i_allocateL1CacheBlock;
+    xs_copyDataToCache;
+    n_popResponseQueue;
+  }
+
+  transition(I, Snarf_Nack, SI_A) {
+    //send snarf nack to dir
+    //sf_sendSnarfNack;
+    i_issuePUTS;
+    v_allocateTBE;
+    n_popResponseQueue;
+  }
+
+  transition({S,M}, {Snarf_Data, Snarf_Nack}) {
+    //Do nothing, alraedy have the data & the dir should know what to do
+    n_popResponseQueue;
+  }
+
+  transition({IM_AC} , {Snarf_Data, Snarf_Nack}, SM_AC) {
+    n_popResponseQueue;
+  }
+
+  transition({IM_AD} , {Snarf_Data, Snarf_Nack}, SM_AD) {
+    n_popResponseQueue;
+  }
+
+  transition({IM_A} , {Snarf_Data, Snarf_Nack}, SM_A) {
+    n_popResponseQueue;
+  }
+
+  transition(SI_A, {Snarf_Data, Snarf_Nack}) {
+    n_popResponseQueue;
+  }
+
+  transition(IS_D, Snarf_Data, S) {
+    xs_copyDataToCache;
+    rx_load_hit;
+    w_deallocateTBE;
+    n_popResponseQueue;
+  }
+
+
+  transition({I, IM_AC}, Inv) {
+    //There is an in flight Snarf Coming, have to wait for it
+    z_stall;
+  }
+
+  //this is a hack
+  //Problem arises when a Sharer gets Invalidated while waiting for PUT_ACK
+  //Put ACK won't come if S->M in dir (INV on the way)
+  //Sharer is still in shared list, so put ack is sent
+  /*transition({I, S, M, IM_AC, IM_AD, IM_A, IS_D, SM_AC, SM_AD, SM_A}, Put_Ack) {
+    n_popResponseQueue;
+  }*/
+
 }

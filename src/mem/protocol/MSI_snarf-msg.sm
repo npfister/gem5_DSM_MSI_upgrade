@@ -37,6 +37,9 @@ enumeration(CoherenceRequestType, desc="...") {
   //ECE 666
   DATA,      desc="Cache block provides data to dir";
   DIR_RSP,    desc="Directory responds with number of invalidations to expect";
+
+  //Snarfing
+  SNARF_NACK,  desc="Cache nacked the snarf";
 }
 
 // CoherenceResponseType
@@ -53,6 +56,7 @@ enumeration(CoherenceResponseType, desc="...") {
   WRITEBACK,         desc="Generic writeback (contains data)";
   PUT_ACK,    desc="Directory acks put request";
   INV_ACK,   desc="Shared block acked the invalidation";
+  SNARF_DATA,  desc="Data sent from Dir to Cache as a snarf";
 }
 
 // RequestMsg (and also forwarded requests)

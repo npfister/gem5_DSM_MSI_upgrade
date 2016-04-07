@@ -55,6 +55,7 @@ machine(Directory, "Directory protocol")
     M, AccessPermission:Invalid, desc="Modified";
     S, AccessPermission:Read_Only, desc="Shared";
 
+    IS, AccessPermission:Busy, desc="transition I->S, waiting on memory fetch";
     SD, AccessPermission:Busy, desc="transition S->S, waiting on memory fetch";
     SM, AccessPermission:Busy, desc="transition S->M, waiting on memory fetch";
     IM, AccessPermission:Busy, desc="transition I->M, waiting on memory fetch";
@@ -94,6 +95,10 @@ machine(Directory, "Directory protocol")
     DMA_WRITE, desc="A DMA Write memory request";
     Inv_Ack, desc="Invalidation ack from sharer";
     Inv_Ack_Last, desc="Received last invalidation ack from sharer";
+
+    //Snarfing Events
+    //Snarf_Nack, desc="Cache nacked the snarf data";
+    GETS_S, desc="Got a GETS while the snarf data is in flight";
   }
 
   // TYPES
@@ -161,14 +166,14 @@ machine(Directory, "Directory protocol")
 
       if (state == State:M) {
         assert(getDirectoryEntry(addr).Owner.count() == 1);
-        assert(getDirectoryEntry(addr).Sharers.count() == 0);
+        //assert(getDirectoryEntry(addr).Sharers.count() == 0); /* Not Applicable for snooping */
       }
 
       getDirectoryEntry(addr).DirectoryState := state;
     
       if (state == State:I)  {
         assert(getDirectoryEntry(addr).Owner.count() == 0);
-        assert(getDirectoryEntry(addr).Sharers.count() == 0);
+        //assert(getDirectoryEntry(addr).Sharers.count() == 0); /* Not applicable for snooping */
       }
     }
   }
@@ -226,6 +231,7 @@ machine(Directory, "Directory protocol")
   in_port(responseCacheQueue_in, ResponseMsg, responseToCache) {
     if (responseCacheQueue_in.isReady()) {
       peek(responseCacheQueue_in, ResponseMsg) {
+      DPRINTF(RubySlicc, "ResponseCache Request got msg %s for addr %s\n", in_msg.Type, in_msg.Addr);
         TBE tbe := TBEs[in_msg.Addr];
         if (in_msg.Type == CoherenceResponseType:INV_ACK) {
           if(tbe.ackLeft == 1) {
@@ -259,9 +265,15 @@ machine(Directory, "Directory protocol")
   in_port(requestQueue_in, RequestMsg, requestToDir) {
     if (requestQueue_in.isReady()) {
       peek(requestQueue_in, RequestMsg) {
+      DPRINTF(RubySlicc, "RequestQueue Request got msg %s for addr %s from %s\n", in_msg.Type, in_msg.Addr, in_msg.Requestor);
         TBE tbe := TBEs[in_msg.Addr];
         if (in_msg.Type == CoherenceRequestType:GETS) {
-          trigger(Event:GETS, in_msg.Addr, tbe);
+          if((getState(tbe, in_msg.Addr) == State:S) && getDirectoryEntry(in_msg.Addr).Sharers.isElement(in_msg.Requestor)) {
+            trigger(Event:GETS_S, in_msg.Addr, tbe);
+          }
+          else {
+            trigger(Event:GETS, in_msg.Addr, tbe);
+          }
         } else if (in_msg.Type == CoherenceRequestType:GETX) {
           trigger(Event:GETX, in_msg.Addr, tbe);
         } else if (in_msg.Type == CoherenceRequestType:PUTX) {
@@ -279,7 +291,7 @@ machine(Directory, "Directory protocol")
           } 
         } else if (in_msg.Type == CoherenceRequestType:DATA) {
           trigger(Event:Data_Owner, in_msg.Addr, tbe); 
-        } else {
+        }else {
           error("Invalid message");
         }
       }
@@ -291,6 +303,7 @@ machine(Directory, "Directory protocol")
   in_port(memQueue_in, MemoryMsg, responseFromMemory) {
     if (memQueue_in.isReady()) {
       peek(memQueue_in, MemoryMsg) {
+      DPRINTF(RubySlicc, "MemQueue Request got msg %s for addr %s\n", in_msg.Type, in_msg.Addr);
         TBE tbe := TBEs[in_msg.Addr];
         if (in_msg.Type == MemoryRequestType:MEMORY_READ) {
           trigger(Event:Memory_Data, in_msg.Addr, tbe);
@@ -561,7 +574,9 @@ machine(Directory, "Directory protocol")
 
   action(dr_sendNumSharers, "sns", desc="Tell requestor how many Invalidations to Expect") {
     peek(requestQueue_in, RequestMsg) {
+
       if( getDirectoryEntry(in_msg.Addr).Sharers.isElement(in_msg.Requestor)) { //requestor not inv itself
+        //DPRINTF(RubySlicc, "Dir RSP #Acks %d addr %s to requestor %s , current sharers: %s \n",getDirectoryEntry(in_msg.Addr).Sharers.count() - 1, in_msg.Addr, in_msg.Requestor, getDirectoryEntry(in_msg.Addr).Sharers);
         enqueue(responseCtrl_out, RequestMsg, 1) {
           out_msg.Addr := address;
           out_msg.Type := CoherenceRequestType:DIR_RSP;
@@ -572,6 +587,7 @@ machine(Directory, "Directory protocol")
       }
       else {
         enqueue(responseCtrl_out, RequestMsg, 1) {
+        //DPRINTF(RubySlicc, "Dir RSP #Acks %d addr %s to requestor %s , current sharers: %s \n",getDirectoryEntry(in_msg.Addr).Sharers.count() , in_msg.Addr, in_msg.Requestor, getDirectoryEntry(in_msg.Addr).Sharers);
           out_msg.Addr := address;
           out_msg.Type := CoherenceRequestType:DIR_RSP;
           out_msg.Destination.add(in_msg.Requestor);
@@ -655,11 +671,51 @@ machine(Directory, "Directory protocol")
     responseCacheQueue_in.dequeue();
   }
 
+  //Snarfing Actions
+  
+  action(ssf_sendSnarfData, "ssf", desc="Send the snarf data to the sharers") {
+    peek(memQueue_in, MemoryMsg) {
+        enqueue(responseNetwork_out, ResponseMsg, 1) {
+        out_msg.Addr := address;
+        out_msg.Type := CoherenceResponseType:SNARF_DATA;
+        out_msg.Destination := getDirectoryEntry(address).Sharers;
+        out_msg.Destination.remove(in_msg.OriginalRequestorMachId);
+        out_msg.DataBlk := in_msg.DataBlk;
+        out_msg.MessageSize := MessageSizeType:Data;
+      }
+    }
+  }
+ 
+  action(ssd_sendSnarfData, "ssd", desc="Send snarf data to sharers") {
+    peek(requestQueue_in, RequestMsg) {
+        enqueue(responseNetwork_out, ResponseMsg, 1) {
+        out_msg.Addr := address;
+        out_msg.Type := CoherenceResponseType:SNARF_DATA;
+        out_msg.Destination := getDirectoryEntry(address).Sharers;
+        out_msg.DataBlk := in_msg.DataBlk;
+        out_msg.MessageSize := MessageSizeType:Data;
+      }
+    }
+  } 
+
+  action(dr_sendZeroSharers, "snz", desc="Tell requestor how many Invalidations to Expect") {
+    peek(requestQueue_in, RequestMsg) {
+        enqueue(responseCtrl_out, RequestMsg, 1) {
+          out_msg.Addr := address;
+          out_msg.Type := CoherenceRequestType:DIR_RSP;
+          out_msg.Destination.add(in_msg.Requestor);
+          out_msg.MessageSize := MessageSizeType:Control;
+          out_msg.expectedAcks := 0;
+      }
+    }
+  }
+
+
   // TRANSITIONS
 
   //DMA stalls
   
-  transition({SD, SM, IM, MS, MSS, MI}, {DMA_READ, DMA_WRITE}) {
+  transition({IS,SD, SM, IM, MS, MSS, MI}, {DMA_READ, DMA_WRITE}) {
     y_recycleDMARequestQueue;
   }
 
@@ -732,6 +788,7 @@ machine(Directory, "Directory protocol")
     l_queueMemoryWBRequest;
     w_deallocateTBE;
     os_ownerToSharer;
+    ssd_sendSnarfData;
     i_popIncomingRequestQueue;
   } 
 
@@ -790,17 +847,29 @@ machine(Directory, "Directory protocol")
 
   //stalls
  
-  transition({SD, SM, IM, MSS, MI}, {GETX, GETS, PUTX, PUTX_Not_Owner, PUTS, PUTS_Last}) {
+  transition({IS,SD, SM, IM, MI}, {GETX, GETS, PUTX, PUTX_Not_Owner, PUTS, PUTS_Last}) {
     z_recycleRequestQueue;
   }
 
-  transition(MS, {GETX, GETS, PUTS, PUTS_Last}) {
+  transition(MSS, {GETX, GETS, PUTX, PUTX_Not_Owner}) {
+    z_recycleRequestQueue;
+  }
+
+  transition(MS, {GETX, GETS}) {
     z_recycleRequestQueue;
   }
  
   //invalid 
 
-  transition({I, S}, GETS, SD) {
+  transition(S, GETS, SD) {
+    //initiate data request
+    //add requestor to sharers
+    qf_queueMemoryFetchRequest;
+    sha_sharerAdd;
+    i_popIncomingRequestQueue;
+  }
+
+  transition(I, GETS, IS) {
     //initiate data request
     //add requestor to sharers
     qf_queueMemoryFetchRequest;
@@ -814,13 +883,21 @@ machine(Directory, "Directory protocol")
     l_popMemQueue;
   }
 
+  transition(IS, Memory_Data, S) {
+    //forward data to requestor
+    d_sendData;
+    ssf_sendSnarfData;
+    l_popMemQueue;
+  }
+
   transition(I, GETX, IM) {
     //send dir_rsp
     //add requestor to owner
     //initiate data request
-    dr_sendNumSharers;
+    dr_sendZeroSharers; //invalidations aren't sent out 
     qf_queueMemoryFetchRequest;
     e_ownerIsRequestor;
+    shr_sharerRemove;
     i_popIncomingRequestQueue;
 
   }
@@ -848,7 +925,8 @@ machine(Directory, "Directory protocol")
     qf_queueMemoryFetchRequest;
     e_ownerIsRequestor;
     g_sendInvalidations;
-    cs_clearSharers;
+    shr_sharerRemove;
+    //cs_clearSharers; /* not needed in snarfing */
     i_popIncomingRequestQueue;
 
   }
@@ -884,7 +962,6 @@ machine(Directory, "Directory protocol")
     //add requestor and owner to shared, clear owner
     f_forwardRequest;
     sha_sharerAdd;
-    os_ownerToSharer;
     i_popIncomingRequestQueue;
 
   }
@@ -892,6 +969,8 @@ machine(Directory, "Directory protocol")
   transition(MS, Data_Owner, MSS) {
     //initiate memory write with data from owner
     l_queueMemoryWBRequest;
+    ssd_sendSnarfData;
+    os_ownerToSharer;
     i_popIncomingRequestQueue;
 
   }
@@ -912,6 +991,8 @@ machine(Directory, "Directory protocol")
     //send dir_rsp to requestor
     f_forwardRequest;
     dr_sendNumSharers;
+    os_ownerToSharer;
+    shr_sharerRemove;
     e_ownerIsRequestor;
     i_popIncomingRequestQueue;
 
@@ -938,10 +1019,18 @@ machine(Directory, "Directory protocol")
     //send PUT ack
     //pta_putAck;
     i_popIncomingRequestQueue;
-
   }
+
+  transition({MS,MSS}, {PUTS, PUTS_Last}) {
+    z_recycleRequestQueue;
+  }
+
   transition(M, PUTX_Not_Owner) { //means ownership changed when PUTX issued, FWD_GETX on the way
     //send PUT ack
+    i_popIncomingRequestQueue;
+  }
+
+  transition(S, GETS_S) {
     i_popIncomingRequestQueue;
   }
 

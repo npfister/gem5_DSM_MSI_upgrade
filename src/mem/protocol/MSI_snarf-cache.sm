@@ -573,13 +573,26 @@ machine(L1Cache, "MSI Snarfing L1 Cache")
     }
   }
 
-  action(sf_sendSnarfNack, "sf", desc="Send Snarf Nack to Dir") {
-    peek(forwardRequestNetwork_in, RequestMsg) {
-      enqueue(requestNetwork_out, RequestMsg, issue_latency) {
+  action(sfn_sendSnarfNack, "sfn", desc="Send Snarf Nack to Dir") {
+    peek(responseNetwork_in, ResponseMsg) {
+      enqueue(responseNetwork_out, ResponseMsg, 1) {
         out_msg.Addr := address;
-        out_msg.Type := CoherenceRequestType:SNARF_NACK;
+        out_msg.Type := CoherenceResponseType:SNARF_NACK;
         out_msg.Destination.add(map_Address_to_Directory(in_msg.Addr));
         out_msg.MessageSize := MessageSizeType:Control;
+        out_msg.Sender := machineID;
+      }
+    }
+  }
+
+  action(sfa_sendSnarfAck, "sfa", desc="Send Snarf Ack to Dir") {
+    peek(responseNetwork_in, ResponseMsg) {
+      enqueue(responseNetwork_out, ResponseMsg, 1) {
+        out_msg.Addr := address;
+        out_msg.Type := CoherenceResponseType:SNARF_ACK;
+        out_msg.Destination.add(map_Address_to_Directory(in_msg.Addr));
+        out_msg.MessageSize := MessageSizeType:Control;
+        out_msg.Sender := machineID;
       }
     }
   }
@@ -806,7 +819,7 @@ machine(L1Cache, "MSI Snarfing L1 Cache")
 
   transition(MI_A, Fwd_GETS, SI_A) {
     //Go wait for inv or put ack, if receive put ack, our messge got to dir first
-    //ee_sendDataFromTBE;  change 4/5/16 snarfing will get data to requestor
+    ee_sendDataFromTBE;  
     etd_sendDataDir;
     o_popForwardedRequestQueue;
   }
@@ -822,7 +835,7 @@ machine(L1Cache, "MSI Snarfing L1 Cache")
 
   transition(M, Fwd_GETS, S) {
     //send data to requestor and dir
-    //e_sendData; change 4/5/16 snarfing will get data to requestor
+    e_sendData; 
     ed_sendDataDir;
     o_popForwardedRequestQueue;
   }
@@ -840,57 +853,70 @@ machine(L1Cache, "MSI Snarfing L1 Cache")
     //copy data into cache
     i_allocateL1CacheBlock;
     xs_copyDataToCache;
+    sfa_sendSnarfAck;
     n_popResponseQueue;
   }
 
-  transition(I, Snarf_Nack, SI_A) {
+  transition(I, Snarf_Nack){ //, SI_A) {
     //send snarf nack to dir
-    //sf_sendSnarfNack;
-    i_issuePUTS;
-    v_allocateTBE;
+    sfn_sendSnarfNack;
     n_popResponseQueue;
   }
 
-  transition({S,M}, {Snarf_Data, Snarf_Nack}) {
-    //Do nothing, alraedy have the data & the dir should know what to do
+  transition({S,M}, Snarf_Data) {
+    sfa_sendSnarfAck;
     n_popResponseQueue;
   }
 
-  transition({IM_AC} , {Snarf_Data, Snarf_Nack}, SM_AC) {
+  transition({S,M}, Snarf_Nack) {
+    sfn_sendSnarfNack;
     n_popResponseQueue;
   }
 
-  transition({IM_AD} , {Snarf_Data, Snarf_Nack}, SM_AD) {
+  transition(IM_AC , Snarf_Data, SM_AC) {
+    sfa_sendSnarfAck;
     n_popResponseQueue;
   }
 
-  transition({IM_A} , {Snarf_Data, Snarf_Nack}, SM_A) {
+  transition({IM_AD} , Snarf_Data, SM_AD) {
+    sfa_sendSnarfAck;
     n_popResponseQueue;
   }
 
-  transition(SI_A, {Snarf_Data, Snarf_Nack}) {
+  transition({IM_A} , Snarf_Data, SM_A) {
+    sfa_sendSnarfAck;
     n_popResponseQueue;
   }
 
+  transition(IM_AC , Snarf_Nack, SM_AC) {
+    sfn_sendSnarfNack;
+    n_popResponseQueue;
+  }
+
+  transition({IM_AD} , Snarf_Nack, SM_AD) {
+    sfn_sendSnarfNack;
+    n_popResponseQueue;
+  }
+
+  transition({IM_A} , Snarf_Nack, SM_A) {
+    sfn_sendSnarfNack;
+    n_popResponseQueue;
+  }
+
+  //Can't do this, have to wait for DATA
+  //Should Nack Snarf
+  /*
   transition(IS_D, Snarf_Data, S) {
     xs_copyDataToCache;
+    sfa_sendSnarfAck;
     rx_load_hit;
     w_deallocateTBE;
     n_popResponseQueue;
-  }
+  } */
 
-
-  transition({I, IM_AC}, Inv) {
-    //There is an in flight Snarf Coming, have to wait for it
-    z_stall;
-  }
-
-  //this is a hack
-  //Problem arises when a Sharer gets Invalidated while waiting for PUT_ACK
-  //Put ACK won't come if S->M in dir (INV on the way)
-  //Sharer is still in shared list, so put ack is sent
-  /*transition({I, S, M, IM_AC, IM_AD, IM_A, IS_D, SM_AC, SM_AD, SM_A}, Put_Ack) {
+  transition(IS_D, {Snarf_Data, Snarf_Nack}) {
+    sfn_sendSnarfNack;
     n_popResponseQueue;
-  }*/
+  }
 
 }

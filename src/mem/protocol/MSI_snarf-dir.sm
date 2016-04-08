@@ -98,7 +98,12 @@ machine(Directory, "Directory protocol")
 
     //Snarfing Events
     //Snarf_Nack, desc="Cache nacked the snarf data";
-    GETS_S, desc="Got a GETS while the snarf data is in flight";
+    GETS_S, desc="Got a GETS while in Shared";
+    GETS_SN, desc="Got a GETS while Snarf in flight";
+    Snarf_Nack, desc="Cache nacked the snarf";
+    Snarf_Nack_Last, desc="Last Cache nacked the snarf, no more possible sharers";
+    Snarf_Ack, desc="Cache acked the snarf";
+    GETX_Wait, desc="Got a GETX, but still waiting on snarf responses";
   }
 
   // TYPES
@@ -108,7 +113,7 @@ machine(Directory, "Directory protocol")
     State DirectoryState,          desc="Directory state";
     NetDest Sharers,                   desc="Sharers for this block";
     NetDest Owner,                     desc="Owner of this block";
-    NetDest InvWaiter,            desc="Waiting for invalidations";
+    NetDest Snarfers,             desc="List of possible snarfers";
   }
 
   // TBE entries for DMA requests
@@ -166,14 +171,14 @@ machine(Directory, "Directory protocol")
 
       if (state == State:M) {
         assert(getDirectoryEntry(addr).Owner.count() == 1);
-        //assert(getDirectoryEntry(addr).Sharers.count() == 0); /* Not Applicable for snooping */
+        assert(getDirectoryEntry(addr).Sharers.count() == 0);
       }
 
       getDirectoryEntry(addr).DirectoryState := state;
     
       if (state == State:I)  {
         assert(getDirectoryEntry(addr).Owner.count() == 0);
-        //assert(getDirectoryEntry(addr).Sharers.count() == 0); /* Not applicable for snooping */
+        assert(getDirectoryEntry(addr).Sharers.count() == 0); 
       }
     }
   }
@@ -239,7 +244,15 @@ machine(Directory, "Directory protocol")
           } else {
             trigger(Event:Inv_Ack, in_msg.Addr, tbe);
           }
-        }
+        } else if (in_msg.Type == CoherenceResponseType:SNARF_NACK) {
+          if((getDirectoryEntry(in_msg.Addr).Snarfers.count() == 1) && (getDirectoryEntry(in_msg.Addr).Sharers.count() == 0)) {
+            trigger(Event:Snarf_Nack_Last, in_msg.Addr, tbe);
+          } else {
+            trigger(Event:Snarf_Nack, in_msg.Addr, tbe);
+          }
+        } else if (in_msg.Type == CoherenceResponseType:SNARF_ACK) {
+          trigger(Event:Snarf_Ack, in_msg.Addr, tbe);
+        } 
         else {
           error("Invalid message");
         }
@@ -270,12 +283,18 @@ machine(Directory, "Directory protocol")
         if (in_msg.Type == CoherenceRequestType:GETS) {
           if((getState(tbe, in_msg.Addr) == State:S) && getDirectoryEntry(in_msg.Addr).Sharers.isElement(in_msg.Requestor)) {
             trigger(Event:GETS_S, in_msg.Addr, tbe);
+          } else if ((getState(tbe, in_msg.Addr) == State:S) && (getDirectoryEntry(in_msg.Addr).Snarfers.isElement(in_msg.Requestor))) {
+            trigger(Event:GETS_SN, in_msg.Addr, tbe);
           }
           else {
             trigger(Event:GETS, in_msg.Addr, tbe);
           }
         } else if (in_msg.Type == CoherenceRequestType:GETX) {
-          trigger(Event:GETX, in_msg.Addr, tbe);
+          if(getDirectoryEntry(in_msg.Addr).Snarfers.count() == 0) {
+            trigger(Event:GETX, in_msg.Addr, tbe);
+          } else {
+            trigger(Event:GETX_Wait, in_msg.Addr, tbe);
+          }
         } else if (in_msg.Type == CoherenceRequestType:PUTX) {
           if(getDirectoryEntry(in_msg.Addr).Owner.isElement(in_msg.Requestor)) {
             trigger(Event:PUTX, in_msg.Addr, tbe);
@@ -283,7 +302,7 @@ machine(Directory, "Directory protocol")
             trigger(Event:PUTX_Not_Owner, in_msg.Addr, tbe);
           }
         } else if (in_msg.Type == CoherenceRequestType:PUTS) {
-          if(getDirectoryEntry(in_msg.Addr).Sharers.count() == 1 && getDirectoryEntry(in_msg.Addr).Sharers.isElement(in_msg.Requestor)) {
+          if((getDirectoryEntry(in_msg.Addr).Sharers.count() == 1 && getDirectoryEntry(in_msg.Addr).Sharers.isElement(in_msg.Requestor)) && getDirectoryEntry(in_msg.Addr).Snarfers.count() == 0) {
             trigger(Event:PUTS_Last, in_msg.Addr, tbe);
           } 
           else {
@@ -461,7 +480,6 @@ machine(Directory, "Directory protocol")
     dmaRequestQueue_in.recycle();
   }
 
-
   action(qf_queueMemoryFetchRequest, "qf", desc="Queue off-chip fetch request") {
     peek(requestQueue_in, RequestMsg) {
       queueMemoryRead(in_msg.Requestor, address, to_memory_controller_latency);
@@ -543,6 +561,7 @@ machine(Directory, "Directory protocol")
   action(sha_sharerAdd, "sha", desc="Add the requestor to the shared list") {
     peek(requestQueue_in, RequestMsg) {
       getDirectoryEntry(in_msg.Addr).Sharers.add(in_msg.Requestor);
+      getDirectoryEntry(in_msg.Addr).Snarfers.remove(in_msg.Requestor);
     }
   }
 
@@ -561,6 +580,7 @@ machine(Directory, "Directory protocol")
 
   action(os_ownerToSharer, "os", desc="Add the Owner as a Sharer") {
     peek(requestQueue_in, RequestMsg) {
+      getDirectoryEntry(in_msg.Addr).Snarfers.removeNetDest(getDirectoryEntry(in_msg.Addr).Owner);
       getDirectoryEntry(in_msg.Addr).Sharers.addNetDest(getDirectoryEntry(in_msg.Addr).Owner);
       getDirectoryEntry(in_msg.Addr).Owner.clear();
     }
@@ -671,6 +691,13 @@ machine(Directory, "Directory protocol")
     responseCacheQueue_in.dequeue();
   }
 
+  action(osn_ownerToSnarfer, "osn", desc="Add the Owner as a Snarfer") {
+    peek(requestQueue_in, RequestMsg) {
+      getDirectoryEntry(in_msg.Addr).Snarfers.addNetDest(getDirectoryEntry(in_msg.Addr).Owner);
+      getDirectoryEntry(in_msg.Addr).Owner.clear();
+    }
+  }
+
   //Snarfing Actions
   
   action(ssf_sendSnarfData, "ssf", desc="Send the snarf data to the sharers") {
@@ -678,10 +705,11 @@ machine(Directory, "Directory protocol")
         enqueue(responseNetwork_out, ResponseMsg, 1) {
         out_msg.Addr := address;
         out_msg.Type := CoherenceResponseType:SNARF_DATA;
-        out_msg.Destination := getDirectoryEntry(address).Sharers;
+        out_msg.Destination := getDirectoryEntry(address).Snarfers;
         out_msg.Destination.remove(in_msg.OriginalRequestorMachId);
         out_msg.DataBlk := in_msg.DataBlk;
         out_msg.MessageSize := MessageSizeType:Data;
+        DPRINTF(RubySlicc, "Sending Snarfs for addr %s to %s\n", address, out_msg.Destination); 
       }
     }
   }
@@ -691,9 +719,11 @@ machine(Directory, "Directory protocol")
         enqueue(responseNetwork_out, ResponseMsg, 1) {
         out_msg.Addr := address;
         out_msg.Type := CoherenceResponseType:SNARF_DATA;
-        out_msg.Destination := getDirectoryEntry(address).Sharers;
+        out_msg.Destination := getDirectoryEntry(address).Snarfers;
+        out_msg.Destination.removeNetDest(getDirectoryEntry(address).Sharers);
         out_msg.DataBlk := in_msg.DataBlk;
         out_msg.MessageSize := MessageSizeType:Data;
+        DPRINTF(RubySlicc, "Sending Snarfs for addr %s to %s\n", address, out_msg.Destination); 
       }
     }
   } 
@@ -710,6 +740,41 @@ machine(Directory, "Directory protocol")
     }
   }
 
+  action(sts_sharersToSnarfers, "sts", desc="Move the sharers list to the snarfer list") {
+    getDirectoryEntry(address).Snarfers := getDirectoryEntry(address).Sharers;
+    getDirectoryEntry(address).Sharers.clear();
+  }
+
+  action(ms_moveSnarferToShared, "ms", desc="Move the Snarfer to the shared list") {
+    peek(responseCacheQueue_in, ResponseMsg) {
+      getDirectoryEntry(in_msg.Addr).Sharers.add(in_msg.Sender);
+      getDirectoryEntry(in_msg.Addr).Snarfers.remove(in_msg.Sender);
+      DPRINTF(RubySlicc, "Removed snarfer %s for addr %s, new snarfer list %s\n", in_msg.Sender, in_msg.Addr, getDirectoryEntry(in_msg.Addr).Snarfers);
+    }
+  }
+
+  action(rs_removeSnarfer, "rs", desc="Remove the Snarfer from Snarfer list") {
+    peek(responseCacheQueue_in, ResponseMsg) {
+      getDirectoryEntry(in_msg.Addr).Snarfers.remove(in_msg.Sender);
+      DPRINTF(RubySlicc, "Removed snarfer %s for addr %s, new snarfer list %s\n", in_msg.Sender, in_msg.Addr, getDirectoryEntry(in_msg.Addr).Snarfers);
+    }
+  }
+
+  action(snr_snarferRemove, "snr", desc="Remove the requestor from the Snarfer List") {
+    peek(requestQueue_in, RequestMsg) {
+      getDirectoryEntry(in_msg.Addr).Snarfers.remove(in_msg.Requestor);
+    }
+  }
+
+  action(x_recycleresponseCacheQueue, "x", desc="recycle cache queue") {
+    responseCacheQueue_in.recycle();
+  }
+
+  action(sna_snarferAdd, "sna", desc="Add the requestor to the Snarfer List") {
+    peek(requestQueue_in, RequestMsg) {
+      getDirectoryEntry(in_msg.Addr).Snarfers.add(in_msg.Requestor);
+    }
+  }
 
   // TRANSITIONS
 
@@ -719,15 +784,15 @@ machine(Directory, "Directory protocol")
     y_recycleDMARequestQueue;
   }
 
-  transition({D_RWS, D_RWI}, {GETX, GETS, PUTX, PUTX_Not_Owner, PUTS, PUTS_Last}) {
+  transition({D_RWS, D_RWI}, {GETX, GETX_Wait, GETS, PUTX, PUTX_Not_Owner, PUTS, PUTS_Last}) {
     z_recycleRequestQueue;
   }
 
-  transition(D_A, {GETX, GETS, PUTX, PUTX_Not_Owner}) {
+  transition(D_A, {GETX, GETX_Wait, GETS, PUTX, PUTX_Not_Owner}) {
     z_recycleRequestQueue;
   }
 
-  transition({D_MM, D_MS}, {GETX, GETS, PUTX, PUTX_Not_Owner, PUTS, PUTS_Last}) {
+  transition({D_MM, D_MS}, {GETX, GETX_Wait, GETS, PUTX, PUTX_Not_Owner, PUTS, PUTS_Last}) {
     z_recycleRequestQueue;
   }
 
@@ -847,15 +912,15 @@ machine(Directory, "Directory protocol")
 
   //stalls
  
-  transition({IS,SD, SM, IM, MI}, {GETX, GETS, PUTX, PUTX_Not_Owner, PUTS, PUTS_Last}) {
+  transition({IS,SD, SM, IM, MI}, {GETX, GETX_Wait, GETS, PUTX, PUTX_Not_Owner, PUTS, PUTS_Last}) {
     z_recycleRequestQueue;
   }
 
-  transition(MSS, {GETX, GETS, PUTX, PUTX_Not_Owner}) {
+  transition(MSS, {GETX, GETX_Wait, GETS, PUTX, PUTX_Not_Owner}) {
     z_recycleRequestQueue;
   }
 
-  transition(MS, {GETX, GETS}) {
+  transition(MS, {GETX, GETX_Wait, GETS}) {
     z_recycleRequestQueue;
   }
  
@@ -890,17 +955,6 @@ machine(Directory, "Directory protocol")
     l_popMemQueue;
   }
 
-  transition(I, GETX, IM) {
-    //send dir_rsp
-    //add requestor to owner
-    //initiate data request
-    dr_sendZeroSharers; //invalidations aren't sent out 
-    qf_queueMemoryFetchRequest;
-    e_ownerIsRequestor;
-    shr_sharerRemove;
-    i_popIncomingRequestQueue;
-
-  }
 
   transition(IM, Memory_Data, M) {
     //forward data to requestor
@@ -926,7 +980,8 @@ machine(Directory, "Directory protocol")
     e_ownerIsRequestor;
     g_sendInvalidations;
     shr_sharerRemove;
-    //cs_clearSharers; /* not needed in snarfing */
+    //cs_clearSharers; /* not needed in snarfing , move sharers to snarf list instead*/
+    sts_sharersToSnarfers;
     i_popIncomingRequestQueue;
 
   }
@@ -969,8 +1024,8 @@ machine(Directory, "Directory protocol")
   transition(MS, Data_Owner, MSS) {
     //initiate memory write with data from owner
     l_queueMemoryWBRequest;
-    ssd_sendSnarfData;
     os_ownerToSharer;
+    ssd_sendSnarfData;
     i_popIncomingRequestQueue;
 
   }
@@ -991,8 +1046,8 @@ machine(Directory, "Directory protocol")
     //send dir_rsp to requestor
     f_forwardRequest;
     dr_sendNumSharers;
-    os_ownerToSharer;
-    shr_sharerRemove;
+    osn_ownerToSnarfer;
+    snr_snarferRemove;
     e_ownerIsRequestor;
     i_popIncomingRequestQueue;
 
@@ -1032,6 +1087,83 @@ machine(Directory, "Directory protocol")
 
   transition(S, GETS_S) {
     i_popIncomingRequestQueue;
+  }
+
+  transition(S, GETS_SN) {
+    z_recycleRequestQueue;
+  }
+
+  transition(S, GETX_Wait) {
+    z_recycleRequestQueue;
+  }
+  
+  transition(M, GETX_Wait, M) {
+    //This happens when M->M transitions keep occuring
+    //add owner to snarfers
+    f_forwardRequest;
+    dr_sendNumSharers;
+    osn_ownerToSnarfer;
+    snr_snarferRemove;
+    e_ownerIsRequestor;
+    i_popIncomingRequestQueue;
+  }
+
+  transition({ IS, S}, Snarf_Ack) {
+    //add sharer to sharers from snarfers
+    ms_moveSnarferToShared;
+    r_popResponseQueue;
+  }
+
+  transition(I, Snarf_Ack, S) {
+    //add sharer to sharers from snarfers
+    ms_moveSnarferToShared;
+    r_popResponseQueue;
+  }
+
+  transition({I, IS, S}, Snarf_Nack) {
+    //remove from snarfers
+    rs_removeSnarfer;
+    r_popResponseQueue;
+  }
+
+  transition({I, IS}, Snarf_Nack_Last) {
+    //remove from snarfers
+    rs_removeSnarfer;
+    r_popResponseQueue;
+  }
+
+  transition(S, Snarf_Nack_Last, I) {
+    rs_removeSnarfer;
+    r_popResponseQueue;
+  }
+
+  transition(I, GETS_SN, IS) {
+    //initiate data request
+    //add requestor to sharers
+    qf_queueMemoryFetchRequest;
+    sha_sharerAdd;
+    snr_snarferRemove;
+    i_popIncomingRequestQueue;
+  }
+  
+  transition({IS, SD, MSS}, GETS_SN) {
+    z_recycleRequestQueue;
+  }
+
+  transition({SD, MSS}, {Snarf_Ack, Snarf_Nack, Snarf_Nack_Last}) {
+    x_recycleresponseCacheQueue;
+  }
+
+  transition(I, {GETX, GETX_Wait}, IM) {
+    //send dir_rsp
+    //add requestor to owner
+    //initiate data request
+    dr_sendZeroSharers; //invalidations aren't sent out 
+    qf_queueMemoryFetchRequest;
+    e_ownerIsRequestor;
+    snr_snarferRemove;
+    i_popIncomingRequestQueue;
+
   }
 
 }

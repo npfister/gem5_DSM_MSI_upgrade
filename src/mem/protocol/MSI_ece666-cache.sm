@@ -103,6 +103,8 @@ machine(L1Cache, "MSI ece666 L1 Cache")
     State CacheState,        desc="cache state";
     bool Dirty,              desc="Is the data dirty (different than memory)?";
     DataBlock DataBlk,       desc="Data in the block";
+    //UPDATE BLKTAGPREFETCHED
+    bool isPreTag, desc="Set if this blk/entry already caused a prefetch, tag it";
   }
 
   // TBE fields
@@ -110,6 +112,9 @@ machine(L1Cache, "MSI ece666 L1 Cache")
     State TBEState,          desc="Transient state";
     DataBlock DataBlk,       desc="data for the block, required for concurrent writebacks";
     int   acksLeft,           desc="Remaining Acks for transitions";
+    //UPDATE BLKTAGPREFETCHED
+    //bool isTagged, desc="Set if next block, by addr, was prefetched";
+    bool isTagPrefetch, desc="Set if this is a tag prefetch";
   }
 
   structure(TBETable, external="yes") {
@@ -146,6 +151,19 @@ machine(L1Cache, "MSI ece666 L1 Cache")
       error("Invalid RubyRequestType");
     }
   }
+
+  /*Event prefetch_request_type_to_event(RubyRequestType type) {
+      if (type == RubyRequestType:LD) {
+          return Event:PF_Load;
+      } else if (type == RubyRequestType:IFETCH) {
+          return Event:PF_Ifetch;
+      } else if ((type == RubyRequestType:ST) ||
+                 (type == RubyRequestType:ATOMIC)) {
+          return Event:PF_Store;
+      } else {
+          error("Invalid RubyRequestType");
+      }
+  }*///UPDATE BLKTAGPREFETCHED
 
   State getState(TBE tbe, Entry cache_entry, Address addr) {
 
@@ -219,6 +237,7 @@ machine(L1Cache, "MSI ece666 L1 Cache")
 
   out_port(requestNetwork_out, RequestMsg, requestFromCache);
   out_port(responseNetwork_out, ResponseMsg, responseFromCache);
+  //out_port(optionalQueue_out, RubyRequest, optionalQueue);//UPDATE BLKTAGPREFETCHED
 
   in_port(responseCtrlNetwork_in, RequestMsg, responseToCacheCtrl) {
     if(responseCtrlNetwork_in.isReady()) {
@@ -438,6 +457,7 @@ machine(L1Cache, "MSI ece666 L1 Cache")
     TBEs.allocate(address);
     set_tbe(TBEs[address]);
     tbe.acksLeft := 0;
+    tbe.isTagPrefetch := false;//TBE TAG PREFETCH FLAG
   }
 
   action(w_deallocateTBE, "w", desc="Deallocate TBE") {
@@ -552,6 +572,23 @@ machine(L1Cache, "MSI ece666 L1 Cache")
     }
   }
 
+  //ECE 666 final project actions
+  action(spt_setIsPreTag, "spt", desc="This cache_entry caused a tag prefetch to occur, should not cause again") {
+      assert(is_valid(cache_entry));
+      cache_entry.isPreTag := true;
+  }
+  //clr action may not be needed
+  action(cpt_clrIsPreTag, "cpt", desc="clr this cache_entry tag prefetch flag") {
+      assert(is_valid(cache_entry));
+      cache_entry.isPreTag := true;
+  }
+  action(spt_setIsTagPrefetch, "stp", desc="This tbe_entry caused a tag prefetch to occur, should not cause again") {
+      assert(is_valid(cache_entry));
+      assert(is_valid(tbe));
+      tbe.isTagPrefetch := true;
+  }
+
+
   // TRANSITIONS
   
   //stall transitions:
@@ -584,23 +621,31 @@ machine(L1Cache, "MSI ece666 L1 Cache")
   }
 
   //cache hit transitions:
-  transition({M,S}, {Load, Ifetch}) {
+
+  //UPDATE BLKTAGPREFETCHED
+    //schedule a new load with hw prefetch flag set
+    //if load happens with hw prefetch flag set don't schedule new low
+    //set tag prefetc of current block to 1 
+
+  transition({M,S}, {Load, Ifetch}) {//UPDATE BLKTAGPREFETCHED
     //read hit
     r_load_hit;
     p_profileHit;
+    spt_setIsPreTag;//set flag indicating has caused tag prefetch
     m_popMandatoryQueue;
   }
 
-  transition(M, Store) {
+  transition(M, Store) {//UPDATE BLKTAGPREFETCHED
     //write hit
     s_store_hit;
     p_profileHit;
+    spt_setIsPreTag;//set flag indicating has caused tag prefetch
     m_popMandatoryQueue;
   }
 
   //INVALID
 
-  transition(I, {Load, Ifetch}, IS_D) {
+  transition(I, {Load, Ifetch}, IS_D) {//UPDATE BLKTAGPREFETCHED, set to 1 and prefetch next blk & set to 0
     //Send GETS
     //move to shared, wait for data from dir or owner
     v_allocateTBE;
@@ -618,7 +663,7 @@ machine(L1Cache, "MSI ece666 L1 Cache")
     n_popResponseQueue;
   }
 
-  transition(I, Store, IM_AC) {
+  transition(I, Store, IM_AC) {//UPDATE BLKTAGPREFETCHED, set to 1 and prefetch next blk & set to 0
     //get expected ack count
     v_allocateTBE;
     i_allocateL1CacheBlock;
@@ -663,8 +708,14 @@ machine(L1Cache, "MSI ece666 L1 Cache")
   } 
 
   //SHARED
-  
-  transition(S, Store, SM_AC) {
+
+//UPDATE BLKTAGPREFETCHED
+    //set blktagprefetch of current blk
+    //setBlkTagPrefetch()
+    //schedule new 
+    //schedNewLoadsetHWPrefetch()
+  //technically a write miss, schedule prefetch for next blk
+  transition(S, Store, SM_AC) {//UPDATE BLKTAGPREFETCHED, if this blk 0, set to 1 prefetch next blk, else do nothing
     //Send GETX
     //Go to wait for ack count
     v_allocateTBE;

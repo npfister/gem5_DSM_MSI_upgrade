@@ -73,6 +73,8 @@ enum CacheBlkStatusBits {
     BlkHWPrefetched =   0x20,
     /** block holds data from the secure memory space */
     BlkSecure =         0x40,
+    /** block already caused a prefetch of next block */
+    BlkTagPrefetched    = 0x80,
 };
 
 /**
@@ -262,6 +264,11 @@ class CacheBlk
     bool wasPrefetched() const
     {
         return (status & BlkHWPrefetched) != 0;
+    }
+
+    bool alreadyTagPrefetched() const
+    {
+        return (status & BlkTagPrefetched) != 0;
     }
 
     /**

@@ -86,6 +86,7 @@ class Cholesky(LiveProcess):
             options.rootdir + '/kernels/cholesky/inputs/tk23.O']
 
 class FFT(LiveProcess):
+    print "Running FFT"
     cwd = options.rootdir + '/kernels/fft'
     executable = options.rootdir + '/kernels/fft/FFT'
     cmd = ['FFT', '-p', str(options.numcpus), '-m18']

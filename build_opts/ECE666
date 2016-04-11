@@ -1,4 +1,4 @@
-TARGET_ISA = 'x86'
+TARGET_ISA = 'alpha'
 CPU_MODELS = 'AtomicSimpleCPU,O3CPU,TimingSimpleCPU'
 PROTOCOL = 'MSI_ece666'
 SLICC_HTML = 1

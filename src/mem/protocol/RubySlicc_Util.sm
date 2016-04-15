@@ -42,3 +42,6 @@ Address setOffset(Address addr, int offset);
 Address makeLineAddress(Address addr);
 int addressOffset(Address addr);
 int mod(int val, int mod);
+Address wrap_next_stride_address(Address addr);
+Address wrap_prev_stride_address(Address addr);
+

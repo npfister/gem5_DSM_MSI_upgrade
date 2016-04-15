@@ -65,6 +65,23 @@ setOffset(Address addr, int offset)
     return result;
 }
 
+//ADD WRAPPER HERE FOR next_stride_address
+inline Address
+wrap_next_stride_address(Address addr)
+{
+    Address result = addr;
+    result.makeNextStrideAddress(1);
+    return result;
+}
+
+inline Address
+wrap_prev_stride_address(Address addr)
+{
+    Address result = addr;
+    result.makeNextStrideAddress(-1);
+    return result;
+}
+
 // Makes an address into a line address
 inline Address
 makeLineAddress(Address addr)

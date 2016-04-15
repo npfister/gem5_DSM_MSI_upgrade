@@ -66,14 +66,14 @@ execfile(os.path.join(config_root, "common", "Options.py"))
 # Set the default cache size and associativity to be very small to encourage
 # races between requests and writebacks.
 #
-options.l1d_size="256B"
-options.l1i_size="256B"
-options.l2_size="512B"
-options.l3_size="1kB"
-options.l1d_assoc=2
-options.l1i_assoc=2
-options.l2_assoc=2
-options.l3_assoc=2
+options.l1d_size="32768B"#"32768B"
+options.l1i_size="32768B"
+options.l2_size="32768B"
+options.l3_size="32768B"
+options.l1d_assoc=4
+options.l1i_assoc=4
+options.l2_assoc=4
+options.l3_assoc=4
 
 if args:
      print "Error: script doesn't take any positional arguments"

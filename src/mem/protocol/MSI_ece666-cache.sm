@@ -48,6 +48,9 @@ machine(L1Cache, "MSI ece666 L1 Cache")
             ordered="true", vnet_type="request";
       
 {
+  // Request Buffer for prefetches
+  MessageBuffer optionalQueue, ordered="false";
+
   // STATES
   state_declaration(State, desc="Cache states") {
     I, AccessPermission:Invalid, desc="Not Present/Invalid";
@@ -92,6 +95,10 @@ machine(L1Cache, "MSI ece666 L1 Cache")
     Inv_Ack,    desc="Invalidation ack from node with block";
     Last_Inv_Ack,  desc="Final Invalidation ack from nodes";
     Dir_Rsp,    desc="Directory responsds to request with number of acks needed";
+
+    PF_Load,    desc="load request from prefetcher";
+    PF_Ifetch,  desc="instruction fetch request from prefetcher";
+    PF_Store,   desc="exclusive load request from prefetcher";
   }
 
   // STRUCTURE DEFINITIONS
@@ -237,7 +244,8 @@ machine(L1Cache, "MSI ece666 L1 Cache")
 
   out_port(requestNetwork_out, RequestMsg, requestFromCache);
   out_port(responseNetwork_out, ResponseMsg, responseFromCache);
-  //out_port(optionalQueue_out, RubyRequest, optionalQueue);//UPDATE BLKTAGPREFETCHED
+  out_port(optionalQueue_out, RubyRequest, optionalQueue);//UPDATE BLKTAGPREFETCHED
+
 
   in_port(responseCtrlNetwork_in, RequestMsg, responseToCacheCtrl) {
     if(responseCtrlNetwork_in.isReady()) {
@@ -295,23 +303,29 @@ machine(L1Cache, "MSI ece666 L1 Cache")
         if (in_msg.Type == CoherenceResponseType:DATA) {
           if(tbe.acksLeft == 0) {
             trigger(Event:Data_A0, in_msg.Addr, cache_entry, tbe);
+            DPRINTF(RubySlicc, "ResponseNetwork Request got Event Data_A0 msg %s for addr %s machine %s\n", in_msg.Type, in_msg.Addr, machineID);
           }
           else {
             trigger(Event:Data_AGT0, in_msg.Addr, cache_entry, tbe);
+            DPRINTF(RubySlicc, "ResponseNetwork Request got Event Data_AGT0 msg %s for addr %s machine %s\n", in_msg.Type, in_msg.Addr, machineID);
           }
         }
         else if (in_msg.Type == CoherenceResponseType:FWD_DATA) {
           trigger(Event:Data_Owner, in_msg.Addr, cache_entry, tbe);
+          DPRINTF(RubySlicc, "ResponseNetwork Request got Event Data_Owner %s for addr %s machine %s\n", in_msg.Type, in_msg.Addr, machineID);
         }
         else if (in_msg.Type == CoherenceResponseType:PUT_ACK) {
           trigger(Event:Put_Ack, in_msg.Addr, cache_entry, tbe);
+          DPRINTF(RubySlicc, "ResponseNetwork Request got Event Put_Ack msg %s for addr %s machine %s\n", in_msg.Type, in_msg.Addr, machineID);
         }
         else if (in_msg.Type == CoherenceResponseType:INV_ACK) {
           if(tbe.acksLeft == 1) {
             trigger(Event:Last_Inv_Ack, in_msg.Addr, cache_entry, tbe);
+            DPRINTF(RubySlicc, "ResponseNetwork Request got Event Last_Inv_Ack msg %s for addr %s machine %s\n", in_msg.Type, in_msg.Addr, machineID);
           }
           else {
             trigger(Event:Inv_Ack, in_msg.Addr, cache_entry, tbe);
+            DPRINTF(RubySlicc, "ResponseNetwork Request got Event Inv_Ack msg %s for addr %s machine %s\n", in_msg.Type, in_msg.Addr, machineID);
           }
         }
         else {
@@ -321,7 +335,56 @@ machine(L1Cache, "MSI ece666 L1 Cache")
     }
   }
 
-    // Mandatory Queue
+  //optionalqueue for prefetching
+  in_port(optionalQueue_in, RubyRequest, optionalQueue){
+    if(optionalQueue_in.isReady()){
+      peek(optionalQueue_in, RubyRequest){
+
+        Entry cache_entry := getCacheEntry(in_msg.LineAddress);
+        TBE tbe := TBEs[in_msg.LineAddress];
+
+        
+        if(is_valid(cache_entry) || is_valid(tbe)){
+          //hit or already fetching
+          //in cache drop this prefetch, by poping optional queue
+          optionalQueue_in.dequeue();
+        }
+        else if (is_invalid(cache_entry) &&
+            cacheMemory.cacheAvail(in_msg.LineAddress) == false ) {
+            // make room for the block
+            trigger(Event:Replacement, cacheMemory.cacheProbe(in_msg.LineAddress),
+                  getCacheEntry(cacheMemory.cacheProbe(in_msg.LineAddress)),
+                  TBEs[cacheMemory.cacheProbe(in_msg.LineAddress)]);
+        }
+        /* else if ((cacheMemory.cacheAvail(in_msg.LineAddress) == false)){
+          //no space in cache, later need to cause replacement for this sort of thing
+          //optionalQueue_in.dequeue();
+          // make room for the block
+          trigger(Event:Replacement, cacheMemory.cacheProbe(in_msg.LineAddress),
+                  getCacheEntry(cacheMemory.cacheProbe(in_msg.LineAddress)),
+                  TBEs[cacheMemory.cacheProbe(in_msg.LineAddress)]);
+        }*/
+
+        else{//cache miss, do the prefetch
+          if (in_msg.Type == RubyRequestType:LD) {
+            DPRINTF(RubySlicc, "PREFETCH LD");
+            trigger(Event:PF_Load, in_msg.LineAddress, cache_entry, tbe);
+          } else if (in_msg.Type == RubyRequestType:IFETCH) {
+            DPRINTF(RubySlicc, "PREFETCH IFETCH");
+            trigger(Event:PF_Ifetch, in_msg.LineAddress, cache_entry, tbe);
+          } /*else if ((in_msg.Type == RubyRequestType:ST) || (in_msg.Type == RubyRequestType:ATOMIC)) {
+            DPRINTF(RubySlicc, "PREFETCH ST/ATOMIC");
+            trigger(Event:PF_Store, in_msg.LineAddress, cache_entry, tbe);
+          } */
+            else {
+            error("Invalid RubyRequestType");
+          }
+        }
+      }
+    }
+  }
+
+  // Mandatory Queue
   in_port(mandatoryQueue_in, RubyRequest, mandatoryQueue, desc="...") {
     if (mandatoryQueue_in.isReady()) {
       peek(mandatoryQueue_in, RubyRequest, block_on="LineAddress") {
@@ -342,6 +405,14 @@ machine(L1Cache, "MSI ece666 L1 Cache")
         }
       }
     }
+  }
+
+  void enqueuePrefetch(Address address, RubyRequestType type) {
+      enqueue(optionalQueue_out, RubyRequest, 1) {
+          out_msg.LineAddress := address;
+          out_msg.Type := type;
+          out_msg.AccessMode := RubyAccessMode:Supervisor;
+      }
   }
 
   // ACTIONS
@@ -420,9 +491,13 @@ machine(L1Cache, "MSI ece666 L1 Cache")
 
   action(rx_load_hit, "rx", desc="External load completed.") {
     peek(responseNetwork_in, ResponseMsg) {
+      //TBE tbe := TBEs[address];
+      assert(is_valid(tbe));
       assert(is_valid(cache_entry));
-      sequencer.readCallback(address, cache_entry.DataBlk, true,
+      if(tbe.isTagPrefetch == false){//if true the sequencer is not expecting a call back, prefetch
+        sequencer.readCallback(address, cache_entry.DataBlk, true,
                              machineIDToMachineType(in_msg.Sender));
+      }
     }
   }
 
@@ -573,7 +648,7 @@ machine(L1Cache, "MSI ece666 L1 Cache")
   }
 
   //ECE 666 final project actions
-  action(spt_setIsPreTag, "spt", desc="This cache_entry caused a tag prefetch to occur, should not cause again") {
+  /*action(spt_setIsPreTag, "spt", desc="This cache_entry caused a tag prefetch to occur, should not cause again") {
       assert(is_valid(cache_entry));
       cache_entry.isPreTag := true;
   }
@@ -581,21 +656,73 @@ machine(L1Cache, "MSI ece666 L1 Cache")
   action(cpt_clrIsPreTag, "cpt", desc="clr this cache_entry tag prefetch flag") {
       assert(is_valid(cache_entry));
       cache_entry.isPreTag := true;
-  }
-  action(spt_setIsTagPrefetch, "stp", desc="This tbe_entry caused a tag prefetch to occur, should not cause again") {
-      assert(is_valid(cache_entry));
+  }*/
+  action(stp_setIsTagPrefetch, "stp", desc="This tbe_entry caused a tag prefetch to occur, should not cause again") {
+      //assert(is_valid(cache_entry));//on a load miss, this will correctly not be valid
       assert(is_valid(tbe));
       tbe.isTagPrefetch := true;
+  }
+  action(eloq_enqLdOptQueue, "eloq", desc="check if need to tag prefetch & enqueue prefetch LD in optionalQueue"){
+      assert(is_valid(cache_entry));
+      peek(mandatoryQueue_in, RubyRequest){
+        //Entry cache_entry := getCacheEntry(in_msg.LineAddress);
+        if(cache_entry.isPreTag){
+          cache_entry.isPreTag := true;//just to do something
+        }
+        else {//has not caused tag prefetch yet
+        
+          //Entry prev_cache_entry := getCacheEntry(wrap_prev_stride_address(address));
+          Entry next_cache_entry := getCacheEntry(wrap_next_stride_address(address));
+          //TBE next_tbe := TBEs[wrap_next_stride_address(address)];
+          //is_valid(prev_cache_entry) && 
+          if( is_invalid(next_cache_entry) ) {
+            //previous blk in cache also, more probable use of prefetch
+            cache_entry.isPreTag := true;//make sure tag prefetch doesn't happen again
+            enqueue(optionalQueue_out, RubyRequest, issue_latency){
+              out_msg.LineAddress := wrap_next_stride_address(address);//next_stride_address();//address,1);// + cacheMemory.Size;
+              out_msg.Type := RubyRequestType:LD;
+              DPRINTF(RubySlicc, "PREFETCH enqueue type: %s addr: %s \n", out_msg.Type, out_msg.LineAddress);
+            }
+          } 
+        }
+      }
+  }
+
+  action(eioq_enqIfOptQueue, "eioq", desc="check if need to tag prefetch & enqueue prefetch IFETCH in optionalQueue"){
+      assert(is_valid(cache_entry));
+      peek(mandatoryQueue_in, RubyRequest){
+        //Entry cache_entry := getCacheEntry(in_msg.LineAddress);
+        if(cache_entry.isPreTag){
+          cache_entry.isPreTag := true;//just to do something
+        }
+        else {//has not caused tag prefetch yet
+        
+          //Entry prev_cache_entry := getCacheEntry(wrap_next_stride_address(address));
+          //if(is_valid(prev_cache_entry)) {
+            //previous blk in cache also, more probable use of prefetch
+            cache_entry.isPreTag := true;//make sure tag prefetch doesn't happen again
+            enqueue(optionalQueue_out, RubyRequest, issue_latency){
+              out_msg.LineAddress := wrap_next_stride_address(address);//next_stride_address();//address,1);// + cacheMemory.Size;
+              out_msg.Type := RubyRequestType:IFETCH;
+              DPRINTF(RubySlicc, "PREFETCH enqueue type: %s addr: %s \n", out_msg.Type, out_msg.LineAddress);
+            }
+          //} 
+        }
+      }
+  }
+
+  action(o_popOptionalQueue, "opop", desc="Pop the optional request queue") {
+    optionalQueue_in.dequeue();
   }
 
 
   // TRANSITIONS
   
   //stall transitions:
-  transition({IM_AC, IM_AD, IM_A, SM_AC, SM_AD, SM_A,  SI_A}, {Fwd_GETX, Fwd_GETS, Load, Ifetch, Store, Replacement}) {
+  transition({IM_AC, IM_AD, IM_A, SM_AC, SM_AD, SM_A,  SI_A}, {Fwd_GETX, Fwd_GETS, PF_Load, PF_Ifetch, Load, Ifetch, Store, Replacement}) {
     z_stall;
   }
-  transition({MI_A}, {Load, Ifetch, Store, Replacement}) {
+  transition({MI_A}, {PF_Load, PF_Ifetch, Load, Ifetch, Store, Replacement}) {
     z_stall;
   }
 
@@ -608,7 +735,7 @@ machine(L1Cache, "MSI ece666 L1 Cache")
     n_popResponseQueue;
   }
 
-  transition(IS_D, Inv) {
+  transition(IS_D, {Inv, Ifetch,Load,PF_Load,Store}) {//orig: Inv new:, Store, Ifetch, Load
     z_stall;
   }
 
@@ -627,11 +754,23 @@ machine(L1Cache, "MSI ece666 L1 Cache")
     //if load happens with hw prefetch flag set don't schedule new low
     //set tag prefetc of current block to 1 
 
-  transition({M,S}, {Load, Ifetch}) {//UPDATE BLKTAGPREFETCHED
+  transition({M,S}, {Load}) {//UPDATE BLKTAGPREFETCHED
     //read hit
     r_load_hit;
     p_profileHit;
-    spt_setIsPreTag;//set flag indicating has caused tag prefetch
+    //TAG PREFETCH OPS
+    eloq_enqLdOptQueue;
+    
+    m_popMandatoryQueue;
+  }
+
+  transition({M,S}, {Ifetch}) {//UPDATE BLKTAGPREFETCHED
+    //read hit
+    r_load_hit;
+    p_profileHit;
+    //TAG PREFETCH OPS
+    eloq_enqLdOptQueue;
+    
     m_popMandatoryQueue;
   }
 
@@ -639,13 +778,40 @@ machine(L1Cache, "MSI ece666 L1 Cache")
     //write hit
     s_store_hit;
     p_profileHit;
-    spt_setIsPreTag;//set flag indicating has caused tag prefetch
+    //TAG PREFETCH OPS
+    eloq_enqLdOptQueue;//may need to issue getX
+
     m_popMandatoryQueue;
   }
 
   //INVALID
 
-  transition(I, {Load, Ifetch}, IS_D) {//UPDATE BLKTAGPREFETCHED, set to 1 and prefetch next blk & set to 0
+  //{PF_Load, PF_Ifetch}
+  transition(I, {PF_Load, PF_Ifetch}, IS_D) {//UPDATE BLKTAGPREFETCHED, set to 1 and prefetch next blk & set to 0
+    //Send GETS
+    //move to shared, wait for data from dir or owner
+    v_allocateTBE;
+    stp_setIsTagPrefetch;//mark as prefetch in tbe
+    i_allocateL1CacheBlock;
+    i_issueGETS;
+    //p_profileMiss;//MAYBE PROFILE PREFETCHES???
+    o_popOptionalQueue;//POP OPTIONAL QUEUEU
+  }  
+
+  transition(I, {Load}, IS_D) {
+    //Send GETS
+    //move to shared, wait for data from dir or owner
+    v_allocateTBE;
+    i_allocateL1CacheBlock;
+    i_issueGETS;
+    p_profileMiss;
+
+    //TAG PREFETCH OPS
+    eloq_enqLdOptQueue;
+
+    m_popMandatoryQueue;
+  }  
+  transition(I, {Ifetch}, IS_D) {
     //Send GETS
     //move to shared, wait for data from dir or owner
     v_allocateTBE;
@@ -669,6 +835,10 @@ machine(L1Cache, "MSI ece666 L1 Cache")
     i_allocateL1CacheBlock;
     p_profileMiss;
     i_issueGETX;
+
+    //TAG PREFETCH OPS
+    eloq_enqLdOptQueue;
+    
     m_popMandatoryQueue;
   }
     
@@ -721,6 +891,10 @@ machine(L1Cache, "MSI ece666 L1 Cache")
     v_allocateTBE;
     p_profileMiss;
     i_issueGETX;
+
+    //TAG PREFETCH OPS
+    eloq_enqLdOptQueue;
+
     m_popMandatoryQueue;
   }
 

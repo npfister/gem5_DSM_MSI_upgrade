@@ -1,3 +1,14 @@
+This is a final project for purdue course ECE666. A course in massively-parallel and distruted computer architecture.
+The two branches in this project are forked from a previous project to upgrade the default gem5 Modified-Invalid (MI)
+distributed shared memory (DSM) cache protocol to a Modified-Shared-Invalid (MSI) DSM protocol. 
+
+Each branch is a different method of accelerating a MSI DSM protocol, one with a snarf-like approach and the other uses
+a tagged prefetching approach. 
+
+The two approaches were benchmarked against eachother and the original MSI DSM protocol.
+
+*******************************************************************************************************************
+
 This is the gem5 simulator.
 
 The main website can be found at http://www.gem5.org
